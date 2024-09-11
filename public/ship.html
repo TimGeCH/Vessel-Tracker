@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Mapbox GL JS Example</title>
+    <link href='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css' rel='stylesheet' />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
+        }
+
+        #data {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: scroll;
+            width: 300px;
+        }
+
+        .mapboxgl-popup {
+            z-index: 1000;
+        }
+
+        .custom-marker {
+            width: 20px;
+            height: 20px;
+            background-color: red;
+            border-radius: 50%;
+            border: 2px solid white;
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        <!-- search box -->
+        <input type="text" id="mmsiSearch" placeholder="Enter MMSI or ShipName"
+            style="position:absolute; top:10px; left:10px; z-index:1; padding:5px; width:150px;">
+        <!-- search button -->
+        <button id="searchBtn" style="position:absolute; top:10px; left:170px; z-index:1; padding:5px;">Search</button>
+    </div>
+    <div style="position: absolute;z-index: 999;width: 20vw;margin-top: 5vh;margin-left: 3vw;background-color: white;"
+        id="search-history"></div>
+
+
+
+    <div id="map"></div>
+    <div id="data"></div>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <script>
+
+
+        window.onload = async function () {
+            try {
+                // Send a request to the server to check if the session exists
+                const response = await fetch('/check-session', {
+                    method: 'GET',
+                    credentials: 'include' // Include cookie information for passing the session
+                });
+                console.log('response:', response);
+                if (response.ok) {
+                    console.log('Session exists, user is logged in.');
+                    // User is logged in, continue loading the page
+                } else if (response.status === 401) {
+                    console.log('No session found, redirecting to login page.');
+                    // If there's no session, redirect to the login page
+                    window.location.href = '/index.html';
+                } else {
+                    console.error('Unexpected response status:', response.status);
+                }
+            } catch (error) {
+                console.error('Error checking session:', error);
+                // If an error occurs, also redirect to the login page
+                window.location.href = '/index.html';
+            }
+
+
+            try {
+                const response = await fetch('/searchHistory', {
+                    method: 'GET',
+                    credentials: 'include' // Ensure cookies are sent with the request
+                });
+                if (!response.ok) {
+                    throw new Error('Failed to fetch search history');
+                }
+                const data = await response.json();
+
+                const historyContainer = document.getElementById('search-history');
+                historyContainer.innerHTML = ''; // Clear existing content
+
+                if (data.length === 0) {
+                    historyContainer.innerHTML = '<p>No search history found.</p>';
+                } else {
+                    const list = document.createElement('ul');
+                    data.forEach(item => {
+                        const listItem = document.createElement('li');
+                        console.log(item)
+                        if (item.MMSI) {
+                            listItem.textContent = `MMSI: ${item.MMSI}, Time: ${item.SearchTime}`;
+                        } else {
+                            listItem.textContent = `Ship: ${item.shipName}, Time: ${item.SearchTime},`;
+                        }
+                        //listItem.textContent = `MMSI: ${mmsi}, Time: ${item.SearchTime}, Ship Name: ${shipName}`;
+                        list.appendChild(listItem);
+                    });
+                    historyContainer.appendChild(list);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('search-history').innerHTML = '<p>Error loading search history.</p>';
+            }
+
+
+        };
+
+
+
+        // // Set Mapbox access token
+        mapboxgl.accessToken = 'pk.eyJ1IjoiamFkZW5sZW1tb24iLCJhIjoiY2swaHF6OGhhMDVoczNtcXJ1eWJhNzljMCJ9.rh0Da7Ct2szjyDfqW5MyTg';
+
+        // Initialize the map
+        const map = new mapboxgl.Map({
+            container: 'map', // Map container ID
+            style: 'mapbox://styles/mapbox/streets-v11', // Map style
+            center: [175.318526, -37.788266], // Initial map center [longitude, latitude]
+            zoom: 8 // Initial map zoom level
+        });
+
+        // Store all markers in an object, using MMSI as the key
+        const markers = {};
+
+        // Connect to the WebSocket server
+        const socket = new WebSocket(`wss://${window.location.host}`);
+
+        // Send initial range after the map is loaded
+        map.on('load', sendMapBounds);
+
+        // Send new map range when the map view changes
+        map.on('moveend', sendMapBounds);
+        // Send new map range with a 200ms delay when the map view changes
+        //map.on('moveend', _.debounce(sendMapBounds, 200));
+
+        socket.onmessage = function (event) {
+            const ships = JSON.parse(event.data);
+            const mapBounds = map.getBounds(); // Get current map view range
+
+            ships.forEach(aisMessage => {
+                const mmsi = aisMessage.MMSI;
+                const latitude = aisMessage.Latitude;
+                const longitude = aisMessage.Longitude;
+                const shipName = aisMessage.ShipName || 'Unknown';
+                const navigationalStatus = aisMessage.NavigationalStatus || 'Unknown';
+                const cog = aisMessage.Cog || 'N/A'; // If `COG` has no value, display "N/A"
+
+                // Update the position of the existing marker
+                if (markers[mmsi]) {
+                    // Update the position of the existing marker
+                    markers[mmsi].setLngLat([longitude, latitude]);
+                } else {
+                    // Create a new marker and store it in the markers object
+                    const marker = new mapboxgl.Marker()
+                        .setLngLat([longitude, latitude])
+                        .setPopup(new mapboxgl.Popup().setHTML(`
+                            <strong>MMSI:</strong> ${mmsi}<br>
+                            <strong>Ship Name:</strong> ${shipName}<br>
+                            <strong>Navigational Status:</strong> ${navigationalStatus}
+                            <strong>COG (Course Over Ground):</strong> ${cog}°
+                        `)) // Directly bind with Popup
+
+                        .addTo(map);
+
+                    markers[mmsi] = marker;
+
+                    marker.getElement().addEventListener('click', () => {
+                        console.log('click on marker...');
+                        marker.togglePopup(); // Automatically toggle Popup display
+                    });
+
+                    marker.getElement().addEventListener('click', () => {
+                        console.log('click on marker...');
+
+                        // If there's already a popup, remove it first
+                        if (currentPopup) {
+                            currentPopup.remove();
+                        }
+
+                        // Create and display a new popup
+                        currentPopup = new mapboxgl.Popup()
+                            .setLngLat([longitude, latitude])
+                            .setHTML(`
+                                <strong>MMSI:</strong> ${mmsi}<br>
+                                <strong>Ship Name:</strong> ${shipName}<br>
+                                <strong>Navigational Status:</strong> ${navigationalStatus}
+                            `)
+                            .addTo(map);
+                        // Check if latitude and longitude are valid
+                        if (longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) {
+                            console.error('Invalid longitude or latitude:', longitude, latitude);
+                        }
+                        console.log('Popup created with content:', currentPopup.getLngLat(), currentPopup._content.innerHTML);
+
+                    });
+
+                }
+            });
+
+
+            // Output the total number of markers currently on the map
+            console.log('Total number of markers:', Object.keys(markers).length);
+
+            // When the total number of markers exceeds 200, clear markers outside the screen
+            if (Object.keys(markers).length > 200) {
+                Object.keys(markers).forEach(mmsi => {
+                    const marker = markers[mmsi];
+                    const markerLngLat = marker.getLngLat();
+
+                    // Check if the marker is within the current view range
+                    if (!mapBounds.contains(markerLngLat)) {
+                        // If the marker is not in range, remove it and delete it from the markers object
+                        marker.remove();
+                        delete markers[mmsi];
+                    }
+                });
+                console.log('Markers outside the view have been removed.');
+            }
+        };
+
+        socket.onerror = function (error) {
+            console.error('WebSocket error:', error);
+        };
+
+        // Send the current map boundary range to the backend
+        function sendMapBounds() {
+            console.log('map area update')
+            if (socket.readyState === WebSocket.OPEN) {
+                const bounds = map.getBounds();
+                const boundsData = {
+                    west: bounds.getWest(),
+                    east: bounds.getEast(),
+                    south: bounds.getSouth(),
+                    north: bounds.getNorth()
+                };
+                socket.send(JSON.stringify(boundsData));
+            }
+        }
+
+
+        document.getElementById('searchBtn').addEventListener('click', async function () {
+            const searchInput = document.getElementById('mmsiSearch').value;
+            // check if input is mmsi or shipname
+            let mmsi = null;
+            let shipName = null;
+            if (!isNaN(searchInput)) {
+                mmsi = searchInput;
+                searchShipByMMSI(mmsi);
+            } else {
+                shipName = searchInput;
+                searchShipByName(shipName);
+            }
+
+            try {
+                const response = await fetch('/searchHistory', {
+                    method: 'GET',
+                    credentials: 'include' // Ensure cookies are sent with the request
+                });
+                if (!response.ok) {
+                    throw new Error('Failed to fetch search history');
+                }
+                const data = await response.json();
+
+                const historyContainer = document.getElementById('search-history');
+                historyContainer.innerHTML = ''; // Clear existing content
+
+                if (data.length === 0) {
+                    historyContainer.innerHTML = '<p>No search history found.</p>';
+                } else {
+                    const list = document.createElement('ul');
+                    data.forEach(item => {
+                        const listItem = document.createElement('li');
+                        console.log(item)
+                        if (item.MMSI) {
+                            listItem.textContent = `MMSI: ${item.MMSI}, Time: ${item.SearchTime}`;
+                        } else {
+                            listItem.textContent = `Ship: ${item.shipName}, Time: ${item.SearchTime},`;
+                        }
+                        //listItem.textContent = `MMSI: ${mmsi}, Time: ${item.SearchTime}, Ship Name: ${shipName}`;
+                        list.appendChild(listItem);
+                    });
+                    historyContainer.appendChild(list);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('search-history').innerHTML = '<p>Error loading search history.</p>';
+            }
+
+        });
+
+        function searchShipByMMSI(mmsi) {
+            // Send a request to the server to find ship information for a specific MMSI
+            fetch(`/search?mmsi=${mmsi}`)
+                .then(response => response.json())
+                .then(ship => {
+                    if (ship) {
+                        // If the ship is found, check if it already exists on the map
+                        if (markers[mmsi]) {
+                            // Remove existing marker
+                            markers[mmsi].remove();
+                            delete markers[mmsi];
+                        }
+                        // Create a new red marker
+                        createCustomMarker(mmsi, ship.Longitude, ship.Latitude, ship.ShipName, ship.NavigationalStatus, ship.Cog);
+
+                        // Move the map center to the ship's location
+                        map.flyTo({ center: [ship.Longitude, ship.Latitude], zoom: 12 });
+                    } else {
+                        alert('Ship not found.');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error searching for ship:', error);
+                    //alert('Error occurred while searching for the ship.');
+                    alert('Ship not found.');
+                });
+
+        }
+
+
+        function searchShipByName(shipName) {
+            // Send a request to the server to find ship information for a specific ship name
+            fetch(`/searchByName?shipName=${shipName}`)
+                .then(response => response.json())
+                .then(ships => {
+                    if (ships.length > 0) {
+                        // Clear previous search result markers (if needed)
+                        Object.keys(markers).forEach(mmsi => {
+                            markers[mmsi].remove();
+                            delete markers[mmsi];
+                        });
+
+                        ships.forEach(ship => {
+                            createCustomMarker(ship.MMSI, ship.Longitude, ship.Latitude, ship.ShipName, ship.NavigationalStatus, ship.Cog);
+                        });
+
+                    } else {
+                        alert('No ships found with the provided name.');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error searching for ships by name:', error);
+                    alert('Error occurred while searching for the ships.');
+                });
+        }
+        // Custom marker
+        function createCustomMarker(mmsi, longitude, latitude, shipName, navigationalStatus, cog) {
+            const el = document.createElement('div');
+            el.className = 'custom-marker';
+            el.style.backgroundColor = 'red'; // Set the entire icon to red
+            el.style.width = '20px';
+            el.style.height = '20px';
+            el.style.borderRadius = '50%'; // Set the icon to be circular
+            // Create a new marker and store it in the markers object
+            const marker = new mapboxgl.Marker(el)
+                .setLngLat([longitude, latitude])
+                .setPopup(new mapboxgl.Popup().setHTML(`
+                    <strong>MMSI:</strong> ${mmsi}<br>
+                    <strong>Ship Name:</strong> ${shipName}<br>
+                    <strong>Navigational Status:</strong> ${navigationalStatus}
+                    <strong>COG (Course Over Ground):</strong> ${cog}°
+                `)) // Directly bind with Popup
+                .addTo(map);
+
+            markers[mmsi] = marker;
+
+            // Add click event to display Popup
+            marker.getElement().addEventListener('click', () => {
+                marker.togglePopup(); // Automatically toggle Popup display
+            });
+
+            return marker;
+        }
+
+
+
+    </script>
+</body>
+
+</html>
